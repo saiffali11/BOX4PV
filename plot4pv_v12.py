@@ -36,7 +36,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
@@ -164,6 +163,16 @@ def build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
     summary = df.groupby(["Variation", "Scan"]).agg(agg)
     summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
     return summary.reset_index()
+
+
+def fmt_title(text: str, bold: bool) -> str:
+    """Return a title string optionally wrapped in bold tags."""
+    return f"<b>{text}</b>" if bold else text
+
+
+def fmt_axis_title(text: str, italic: bool) -> str:
+    """Return an axis title string optionally wrapped in italic tags."""
+    return f"<i>{text}</i>" if italic else text
 
 
 def parse_ipce(file_buffer) -> pd.DataFrame:
@@ -329,32 +338,52 @@ def main() -> None:
                 "Enter the number of variations and assign labels, colours and markers.  Rows are matched by substring search on the file name."
             )
             nvars = st.number_input("Number of variations", min_value=1, max_value=100, value=5, step=1)
-            marker_opts = [
-                "circle", "square", "diamond", "triangle-up", "triangle-down", "triangle-left", "triangle-right",
-                "pentagon", "hexagon", "hexagon2", "star", "star-square", "star-diamond", "cross", "x", "asterisk",
-                "bowtie", "hourglass"
-            ]
-            user_vars: List[Tuple[str, str, str]] = []
+            # Plotly marker symbols used for both box and scatter traces
+            marker_opts = {
+                "circle": "circle",
+                "square": "square",
+                "diamond": "diamond",
+                "triangle-up": "triangle-up",
+                "triangle-down": "triangle-down",
+                "triangle-left": "triangle-left",
+                "triangle-right": "triangle-right",
+                "pentagon": "pentagon",
+                "hexagon": "hexagon",
+                "star": "star",
+                "x": "x",
+                "cross": "cross",
+            }
+            marker_values = list(marker_opts.values())
+            user_vars: List[Tuple[str, str, str, int]] = []
             for i in range(1, int(nvars) + 1):
                 default_col = base_palette[(i - 1) % len(base_palette)]
                 lbl = st.text_input(f"Variation {i} label", key=f"var_lbl_{i}").strip()
                 col = st.color_picker(f"Colour for variation {i}", default_col, key=f"var_col_{i}")
-                mrk = st.selectbox(f"Marker for variation {i}", marker_opts, index=(i - 1) % len(marker_opts), key=f"var_mrk_{i}")
+                mrk_name = st.selectbox(
+                    f"Marker for variation {i}", list(marker_opts.keys()),
+                    index=(i - 1) % len(marker_opts), key=f"var_mrk_{i}"
+                )
+                m_size = st.slider(
+                    f"Marker size for variation {i}", min_value=4, max_value=20, value=8,
+                    key=f"var_msz_{i}"
+                )
                 if lbl:
-                    user_vars.append((lbl, col, mrk))
+                    user_vars.append((lbl, col, marker_opts[mrk_name], m_size))
         var_color_map: Dict[str, str] = {}
         var_marker_map: Dict[str, str] = {}
+        var_size_map: Dict[str, int] = {}
         if user_vars:
             def assign(fname: str) -> str:
                 fname_lower = str(fname).lower() if pd.notna(fname) else ""
-                for lbl, _, _ in user_vars:
+                for lbl, _, _, _ in user_vars:
                     if lbl.lower() in fname_lower:
                         return lbl
                 return "Unassigned"
             combined["Variation"] = combined["File Name"].apply(assign)
-            for lbl, col, mrk in user_vars:
+            for lbl, col, mrk, msz in user_vars:
                 var_color_map[lbl] = col
                 var_marker_map[lbl] = mrk
+                var_size_map[lbl] = msz
             combined = combined[combined["Variation"] != "Unassigned"].copy()
         # Plot settings
         with st.sidebar.expander("Plot Settings", expanded=True):
@@ -368,30 +397,22 @@ def main() -> None:
             show_boxes = st.checkbox("Show box outlines", value=True)
             show_points = st.checkbox("Show data points", value=True)
             outline_px = st.slider("Box border thickness (px)", min_value=1, max_value=6, value=2)
-            # Whisker width clamp to [0.05,1.0]
-            whisker_frac = st.slider("Whisker width (0–1)", min_value=0.05, max_value=1.0, value=0.4)
-            marker_sz = st.slider("Marker size", min_value=2, max_value=12, value=4)
             marker_opacity = st.slider("Marker opacity", min_value=0.2, max_value=1.0, value=0.7, step=0.05)
-            # Marker shape selection for overlay points
-            marker_shape = st.selectbox("Marker shape", options=[
-                "circle", "square", "diamond", "triangle-up", "triangle-down", "x", "cross"
-            ], index=0)
-            # Point positioning: default to overlay so that points appear
-            # directly on top of the boxes.  Users can shift points left or
-            # right if they wish, but the default emphasises overlaying
-            # raw data within the box boundaries.
-            point_pos_choice = st.selectbox("Point position", ["Overlay", "Left", "Right"], index=0)
-            point_pos_map = {"Overlay": 0.0, "Left": -0.4, "Right": 0.4}
-            point_pos = point_pos_map[point_pos_choice]
-            # Spacing between box groups
-            # Use a slider instead of a categorical dropdown to give users
-            # fine‑grained control over the compactness of the box plots.  The
-            # slider value is converted to a fraction between 0 and 1.
-            spacing_val = st.slider(
-                "Adjust spacing between box groups (1–100)", 1, 100, 10,
-                help="Smaller values produce tighter plots"
+            marker_shape = st.selectbox(
+                "Default marker shape", list(marker_opts.keys()), index=0
             )
-            box_gap = spacing_val / 100.0
+            # Control compactness and scatter appearance
+            spacing = st.slider(
+                "Spacing between boxes", min_value=1, max_value=100, value=20,
+                help="Lower values produce a more compact plot"
+            )
+            point_jitter = st.slider(
+                "Point jitter", min_value=0.0, max_value=0.4, value=0.1, step=0.01,
+                help="Horizontal jitter for overlaid data points"
+            )
+            default_marker_sz = st.slider(
+                "Default marker size", min_value=4, max_value=20, value=8
+            )
             download_fmt = st.selectbox("Download format", ["PNG", "SVG"], index=0).lower()
             export_base = st.text_input("Export file base name", value="plot4pv")
             # Combined metric/variation plot toggle
@@ -462,260 +483,88 @@ def main() -> None:
         m_map: Dict[str, str] = {}
         for i, v in enumerate(selected_variations):
             c_map[v] = var_color_map.get(v, base_palette[i % len(base_palette)])
-            m_map[v] = var_marker_map.get(v, marker_opts[i % len(marker_opts)])
+            m_map[v] = var_marker_map.get(v, marker_values[i % len(marker_values)])
         # Box plots
+        box_gap = spacing / 100.0  # Convert spacing slider to Plotly gap (0-1)
         st.subheader("Box Plots")
-        # Determine layout spacing
-        gap = box_gap
-        group_gap = box_gap / 2
-        # Combined metrics figure if requested
+        # --- Combined Box Plot ---
         if show_combined:
-            # Prepare long-form data for combined plot
-            comb_data = []
-            for m in selected_metrics:
-                col_name = metric_map[m]
-                for _, row in data.iterrows():
-                    comb_data.append({
-                        "Metric": m,
-                        "Value": row[col_name],
-                        "Variation": row["Variation"],
-                        "Scan": row["Scan"],
-                        "Jsc": row["Jsc"],
-                        "File Name": row["File Name"],
-                    })
-            comb_df = pd.DataFrame(comb_data)
+            metrics_order = selected_metrics
+            metric_positions = {m: i for i, m in enumerate(metrics_order)}
             fig = go.Figure()
-            # Create box traces per variation and metric
             for v in selected_variations:
-                for m in selected_metrics:
-                    subset = comb_df[(comb_df["Variation"] == v) & (comb_df["Metric"] == m)]
-                    if subset.empty:
+                v_df = data[data["Variation"] == v]
+                for m in metrics_order:
+                    col_name = metric_map[m]
+                    vals = v_df[col_name].dropna()
+                    if vals.empty:
                         continue
+                    x_pos = np.full(len(vals), metric_positions[m], dtype=float)
                     fig.add_trace(
                         go.Box(
-                            y=subset["Value"],
-                            x=[m] * len(subset),
-                            name=f"{v} {m}",
-                            marker_color=c_map[v],
-                            boxpoints="outliers",
-                            marker_outliercolor="black",
-                            line_width=outline_px if show_boxes else 0,
-                            pointpos=point_pos,
-                            whiskerwidth=whisker_frac,
-                            boxmean=True,
+                            x=x_pos,
+                            y=vals,
+                            name=v if m == metrics_order[0] else None,
                             legendgroup=v,
-                            showlegend=False,
+                            offsetgroup=v,
+                            marker_color=c_map[v],
+                            line=dict(width=outline_px if show_boxes else 0),
+                            boxpoints=False,
+                            whiskerwidth=0.5,
                         )
                     )
-                    # Overlay points if enabled
                     if show_points:
-                        custom = np.stack([
-                            subset["Variation"], subset["Scan"], subset["Jsc"], subset["File Name"]
-                        ], axis=-1)
+                        # Add jittered scatter points to mimic a swarm plot
+                        jittered = x_pos + np.random.normal(0, point_jitter, size=len(vals))
                         fig.add_trace(
-                                go.Scatter(
-                                    x=[m] * len(subset),
-                                    y=subset["Value"],
-                                    mode="markers",
-                                    marker=dict(
-                                        color=c_map[v],
-                                        size=marker_sz,
-                                        symbol=var_marker_map.get(v, marker_shape),
-                                        opacity=marker_opacity,
-                                    ),
-                                    customdata=custom,
-                                    hovertemplate="Variation: %{customdata[0]}<br>Scan: %{customdata[1]}<br>Jsc: %{customdata[2]:.2f}<br>File: %{customdata[3]}<extra></extra>",
-                                    showlegend=False,
-                                    legendgroup=v,
-                                )
+                            go.Scatter(
+                                x=jittered,
+                                y=vals,
+                                mode="markers",
+                                marker=dict(
+                                    symbol=m_map.get(v, marker_shape),
+                                    size=var_size_map.get(v, default_marker_sz),
+                                    color=c_map[v],
+                                    opacity=marker_opacity,
+                                ),
+                                name=v,
+                                legendgroup=v,
+                                showlegend=False,
+                            )
                         )
-            # Bold title if requested
-            combined_title = "Combined Box Plot"
-            if bold_title:
-                combined_title = f"<b>{combined_title}</b>"
-            # Update layout for combined metrics box plot
-            # Remove unsupported "bold" property from title_font.  Boldness is handled
-            # via HTML tags in the title string itself.
             fig.update_layout(
-                title=combined_title,
-                xaxis_title="Metric",
-                yaxis_title="Value",
                 boxmode="group",
-                boxgap=gap,
-                boxgroupgap=group_gap,
+                boxgap=box_gap,
+                boxgroupgap=box_gap,
                 template=template_name,
+                xaxis=dict(
+                    tickmode="array",
+                    tickvals=list(metric_positions.values()),
+                    ticktext=[custom_labels.get(m, m) for m in metrics_order],
+                    title=fmt_axis_title("Metric", italic_axes),
+                    titlefont=dict(size=font_size, family=font_family),
+                ),
+                yaxis=dict(
+                    title=fmt_axis_title("Value", italic_axes),
+                    titlefont=dict(size=font_size, family=font_family),
+                ),
+                legend_title_text="Variation",
                 font=dict(size=font_size, family=font_family),
-                title_font=dict(size=font_size + 2, family=font_family, color="black"),
-                xaxis=dict(tickangle=-30, automargin=True),
-                yaxis=dict(automargin=True),
-                margin=dict(l=80, r=40, b=140, t=100),
+                title=dict(
+                    text=fmt_title("Combined Box Plot", bold_title),
+                    font=dict(size=font_size + 2, family=font_family),
+                ),
             )
             st.plotly_chart(fig, use_container_width=True)
-            img = fig.to_image(format=download_fmt, width=1600, height=900, scale=2)
+            buf = io.BytesIO()
+            fig.write_image(buf, format=download_fmt, scale=3)
             st.download_button(
-                label="Download combined box plot", data=img,
-                file_name=f"{export_base}_combined_box_plot.{download_fmt}", mime=f"image/{download_fmt}"
+                label="Download combined box plot",
+                data=buf.getvalue(),
+                file_name=f"{export_base}_combined_box_plot.{download_fmt}",
+                mime=f"image/{download_fmt}",
             )
-        # Individual metric plots
-        for metric in selected_metrics:
-            col = metric_map[metric]
-            # Combined scans or separate
-            if mode_choice == "Combine":
-                df_plot = data.copy()
-                df_plot["VarScan"] = df_plot["Variation"] + " " + df_plot["Scan"]
-                order = [f"{v} {s}" for v in selected_variations for s in selected_scans]
-                fig = go.Figure()
-                # Add box and scatter traces per variation/scan
-                for v in selected_variations:
-                    for s in selected_scans:
-                        sub = df_plot[(df_plot["Variation"] == v) & (df_plot["Scan"] == s)]
-                        if sub.empty:
-                            continue
-                        fig.add_trace(
-                            go.Box(
-                                y=sub[col],
-                                x=[f"{v} {s}"] * len(sub),
-                                name=f"{v} {s}",
-                                marker_color=c_map[v],
-                                boxpoints="outliers",
-                                marker_outliercolor="black",
-                                line_width=outline_px if show_boxes else 0,
-                                pointpos=point_pos,
-                                whiskerwidth=whisker_frac,
-                                boxmean=True,
-                                legendgroup=v,
-                                showlegend=False,
-                            )
-                        )
-                        if show_points:
-                            custom = np.stack([
-                                sub["Variation"], sub["Scan"], sub["Jsc"], sub["File Name"]
-                            ], axis=-1)
-                            fig.add_trace(
-                            go.Scatter(
-                                x=[f"{v} {s}"] * len(sub),
-                                y=sub[col],
-                                mode="markers",
-                                marker=dict(
-                                    color=c_map[v],
-                                    size=marker_sz,
-                                    symbol=var_marker_map.get(v, marker_shape),
-                                    opacity=marker_opacity,
-                                ),
-                                customdata=custom,
-                                hovertemplate="Variation: %{customdata[0]}<br>Scan: %{customdata[1]}<br>Jsc: %{customdata[2]:.2f}<br>File: %{customdata[3]}<extra></extra>",
-                                showlegend=False,
-                                legendgroup=v,
-                            )
-                            )
-                    # Title styling
-                    metric_title = f"{metric} distribution"
-                    # Wrap the title in <b> tags if bold_title is enabled.  Boldness is handled via HTML.
-                    if bold_title:
-                        metric_title = f"<b>{metric_title}</b>"
-                    # Configure layout for the combined scan box plot
-                    fig.update_layout(
-                        title=metric_title,
-                        xaxis_title=x_label,
-                        yaxis_title=custom_labels.get(metric, metric),
-                        boxmode="group",
-                        boxgap=gap,
-                        boxgroupgap=group_gap,
-                        template=template_name,
-                        font=dict(size=font_size, family=font_family),
-                        title_font=dict(size=font_size + 2, family=font_family),
-                        xaxis=dict(tickangle=-30, automargin=True),
-                        yaxis=dict(automargin=True),
-                        margin=dict(l=80, r=40, b=140, t=100),
-                    )
-                if axis_limits[col]:
-                    fig.update_yaxes(range=list(axis_limits[col]))
-                st.plotly_chart(fig, use_container_width=True)
-                img = fig.to_image(format=download_fmt, width=1600, height=900, scale=2)
-                st.download_button(
-                    label=f"Download {metric} box plot", data=img,
-                    file_name=f"{export_base}_{metric}_box_plot.{download_fmt}", mime=f"image/{download_fmt}"
-                )
-            else:
-                # Separate
-                for s in selected_scans:
-                    sub_df = data[data["Scan"] == s]
-                    fig = go.Figure()
-                    for v in selected_variations:
-                        sub = sub_df[sub_df["Variation"] == v]
-                        if sub.empty:
-                            continue
-                        fig.add_trace(
-                            go.Box(
-                                y=sub[col],
-                                x=[v] * len(sub),
-                                name=f"{v}",
-                                marker_color=c_map[v],
-                                boxpoints="outliers",
-                                marker_outliercolor="black",
-                                line_width=outline_px if show_boxes else 0,
-                                pointpos=point_pos,
-                                whiskerwidth=whisker_frac,
-                                boxmean=True,
-                                legendgroup=v,
-                                showlegend=False,
-                            )
-                        )
-                        if show_points:
-                            custom = np.stack([
-                                sub["Variation"], sub["Scan"], sub["Jsc"], sub["File Name"]
-                            ], axis=-1)
-                            fig.add_trace(
-                            go.Scatter(
-                                x=[v] * len(sub),
-                                y=sub[col],
-                                mode="markers",
-                                marker=dict(
-                                    color=c_map[v],
-                                    size=marker_sz,
-                                    symbol=var_marker_map.get(v, marker_shape),
-                                    opacity=marker_opacity,
-                                ),
-                                customdata=custom,
-                                hovertemplate="Variation: %{customdata[0]}<br>Scan: %{customdata[1]}<br>Jsc: %{customdata[2]:.2f}<br>File: %{customdata[3]}<extra></extra>",
-                                showlegend=False,
-                                legendgroup=v,
-                            )
-                            )
-                    # Construct the title string and wrap in <b> tags if bold_title is enabled.
-                    title_text = f"{metric} ({s}) distribution"
-                    if bold_title:
-                        title_text = f"<b>{title_text}</b>"
-                    # Update layout for separate scan box plot
-                    fig.update_layout(
-                        title=title_text,
-                        xaxis_title=x_label,
-                        yaxis_title=custom_labels.get(metric, metric),
-                        boxmode="group",
-                        boxgap=gap,
-                        boxgroupgap=group_gap,
-                        template=template_name,
-                        font=dict(size=font_size, family=font_family),
-                        title_font=dict(size=font_size + 2, family=font_family),
-                        xaxis=dict(tickangle=-30, automargin=True),
-                        yaxis=dict(automargin=True),
-                        margin=dict(l=80, r=40, b=140, t=100),
-                    )
-                    if axis_limits[col]:
-                        fig.update_yaxes(range=list(axis_limits[col]))
-                    st.plotly_chart(fig, use_container_width=True)
-                    img = fig.to_image(format=download_fmt, width=1600, height=900, scale=2)
-                st.download_button(
-                    label=f"Download {metric} ({s}) box plot", data=img,
-                    file_name=f"{export_base}_{metric}_{s}_box_plot.{download_fmt}", mime=f"image/{download_fmt}"
-                )
-
-        # ------------------------------------------------------------------
-        # Individual Variation Analysis: provide separate plots for a single
-        # variation.  This section appears after all metric plots are drawn.
-        # It allows users to select one variation and view Jsc, Voc, FF and
-        # PCE distributions independently.  The plots respect all current
-        # settings (box/point toggles, spacing, marker size/shape, etc.).
+        # --- Individual Variation Analysis ---
         if selected_variations:
             st.subheader("Individual Variation Analysis")
             indiv_var = st.selectbox(
@@ -728,80 +577,68 @@ def main() -> None:
                 if var_df.empty:
                     st.info("No data available for the selected variation.")
                 else:
-                    # Create one tab per selected metric
-                    metric_tabs = st.tabs([m for m in selected_metrics])
-                    for (tab, metric_name) in zip(metric_tabs, selected_metrics):
+                    tabs = st.tabs(selected_metrics)
+                    for tab, metric_name in zip(tabs, selected_metrics):
                         with tab:
                             col_name = metric_map[metric_name]
+                            vals = var_df[col_name].dropna()
+                            if vals.empty:
+                                st.info("No data to display.")
+                                continue
+                            x_vals = np.zeros(len(vals))
                             fig_var = go.Figure()
-                            for s in selected_scans:
-                                sub = var_df[var_df["Scan"] == s]
-                                if sub.empty:
-                                    continue
-                                # Box trace for the variation and scan
+                            fig_var.add_trace(
+                                go.Box(
+                                    x=x_vals,
+                                    y=vals,
+                                    name=indiv_var,
+                                    marker_color=c_map.get(indiv_var, base_palette[0]),
+                                    line=dict(width=outline_px if show_boxes else 0),
+                                    boxpoints=False,
+                                    whiskerwidth=0.5,
+                                )
+                            )
+                            if show_points:
+                                jitter = np.random.normal(0, point_jitter, size=len(vals))
                                 fig_var.add_trace(
-                                    go.Box(
-                                        y=sub[col_name],
-                                        x=[s] * len(sub),
-                                        name=f"{s}",
-                                        marker_color=c_map.get(indiv_var, base_palette[0]),
-                                        boxpoints="outliers",
-                                        marker_outliercolor="black",
-                                        line_width=outline_px if show_boxes else 0,
-                                        pointpos=point_pos,
-                                        whiskerwidth=whisker_frac,
-                                        boxmean=True,
-                                        legendgroup=s,
+                                    go.Scatter(
+                                        x=jitter,
+                                        y=vals,
+                                        mode="markers",
+                                        marker=dict(
+                                            symbol=m_map.get(indiv_var, marker_shape),
+                                            size=var_size_map.get(indiv_var, default_marker_sz),
+                                            color=c_map.get(indiv_var, base_palette[0]),
+                                            opacity=marker_opacity,
+                                        ),
                                         showlegend=False,
                                     )
                                 )
-                                # Scatter overlay per scan
-                                if show_points:
-                                    custom = np.stack([
-                                        sub["Variation"], sub["Scan"], sub["Jsc"], sub["File Name"]
-                                    ], axis=-1)
-                                    fig_var.add_trace(
-                                        go.Scatter(
-                                            x=[s] * len(sub),
-                                            y=sub[col_name],
-                                            mode="markers",
-                                            marker=dict(
-                                                color=c_map.get(indiv_var, base_palette[0]),
-                                                size=marker_sz,
-                                                symbol=var_marker_map.get(indiv_var, marker_shape),
-                                                opacity=marker_opacity,
-                                            ),
-                                            customdata=custom,
-                                            hovertemplate="Variation: %{customdata[0]}<br>Scan: %{customdata[1]}<br>Jsc: %{customdata[2]:.2f}<br>File: %{customdata[3]}<extra></extra>",
-                                            showlegend=False,
-                                            legendgroup=s,
-                                        )
-                                    )
-                            # Build title
-                            title_text = f"{metric_name} distribution for {indiv_var}"
-                            if bold_title:
-                                title_text = f"<b>{title_text}</b>"
                             fig_var.update_layout(
-                                title=title_text,
-                                xaxis_title="Scan",
-                                yaxis_title=custom_labels.get(metric_name, metric_name),
-                                boxmode="group",
-                                boxgap=box_gap,
-                                boxgroupgap=box_gap / 2,
                                 template=template_name,
+                                boxgap=box_gap,
+                                boxgroupgap=box_gap,
+                                xaxis=dict(showticklabels=False, range=[-0.5, 0.5]),
+                                yaxis=dict(
+                                    title=fmt_axis_title(custom_labels.get(metric_name, metric_name), italic_axes),
+                                    titlefont=dict(size=font_size, family=font_family),
+                                ),
                                 font=dict(size=font_size, family=font_family),
-                                title_font=dict(size=font_size + 2, family=font_family),
-                                xaxis=dict(tickangle=-30, automargin=True),
-                                yaxis=dict(automargin=True),
-                                margin=dict(l=80, r=40, b=140, t=100),
+                                title=dict(
+                                    text=fmt_title(f"{metric_name} distribution for {indiv_var}", bold_title),
+                                    font=dict(size=font_size + 2, family=font_family),
+                                ),
                             )
                             if axis_limits.get(col_name):
-                                fig_var.update_yaxes(range=list(axis_limits[col_name]))
+                                fig_var.update_yaxes(range=axis_limits[col_name])
                             st.plotly_chart(fig_var, use_container_width=True)
-                            img_var = fig_var.to_image(format=download_fmt, width=1600, height=900, scale=2)
+                            buf = io.BytesIO()
+                            fig_var.write_image(buf, format=download_fmt, scale=3)
                             st.download_button(
-                                label=f"Download {metric_name} plot for {indiv_var}", data=img_var,
-                                file_name=f"{export_base}_{metric_name}_{indiv_var}_box_plot.{download_fmt}", mime=f"image/{download_fmt}"
+                                label=f"Download {metric_name} plot for {indiv_var}",
+                                data=buf.getvalue(),
+                                file_name=f"{export_base}_{metric_name}_{indiv_var}_box_plot.{download_fmt}",
+                                mime=f"image/{download_fmt}",
                             )
     elif mode == "IPCE Curve":
         # Upload
